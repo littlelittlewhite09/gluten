@@ -19,6 +19,7 @@
 #include <arrow/io/api.h>
 
 #include <cstring>
+#include <optional>
 
 #include "shuffle/Payload.h"
 #include "shuffle/VeloxHashShuffleWriter.h"
@@ -537,20 +538,36 @@ class VeloxShuffleReaderStreamMergeTest : public ::testing::Test, public VeloxSh
   std::vector<RowVectorPtr> readStreams(
       const RowTypePtr& rowType,
       int32_t batchSize,
-      std::vector<std::shared_ptr<arrow::io::InputStream>> streams) {
+      std::vector<std::shared_ptr<arrow::io::InputStream>> streams,
+      std::optional<bool> enableStreamMerge = std::nullopt) {
     const auto schema = toArrowSchema(rowType, getDefaultMemoryManager()->getLeafMemoryPool().get());
     std::shared_ptr<arrow::util::Codec> codec =
         createCompressionCodec(arrow::Compression::UNCOMPRESSED, CodecBackend::NONE);
-    auto deserializerFactory = std::make_unique<VeloxShuffleReaderDeserializerFactory>(
-        schema,
-        codec,
-        arrowCompressionTypeToVelox(arrow::Compression::UNCOMPRESSED),
-        rowType,
-        batchSize,
-        kDefaultReadBufferSize,
-        kDefaultDeserializerBufferSize,
-        getDefaultMemoryManager(),
-        ShuffleWriterType::kHashShuffle);
+    std::unique_ptr<VeloxShuffleReaderDeserializerFactory> deserializerFactory;
+    if (enableStreamMerge.has_value()) {
+      deserializerFactory = std::make_unique<VeloxShuffleReaderDeserializerFactory>(
+          schema,
+          codec,
+          arrowCompressionTypeToVelox(arrow::Compression::UNCOMPRESSED),
+          rowType,
+          batchSize,
+          kDefaultReadBufferSize,
+          kDefaultDeserializerBufferSize,
+          getDefaultMemoryManager(),
+          ShuffleWriterType::kHashShuffle,
+          enableStreamMerge.value());
+    } else {
+      deserializerFactory = std::make_unique<VeloxShuffleReaderDeserializerFactory>(
+          schema,
+          codec,
+          arrowCompressionTypeToVelox(arrow::Compression::UNCOMPRESSED),
+          rowType,
+          batchSize,
+          kDefaultReadBufferSize,
+          kDefaultDeserializerBufferSize,
+          getDefaultMemoryManager(),
+          ShuffleWriterType::kHashShuffle);
+    }
 
     auto reader = std::make_shared<VeloxShuffleReader>(std::move(deserializerFactory));
     const auto iter = reader->read(std::make_shared<MultiStreamReader>(std::move(streams)));
@@ -595,13 +612,29 @@ TEST_F(VeloxShuffleReaderStreamMergeTest, hashReaderMergesWithinStream) {
 
   std::vector<std::shared_ptr<arrow::io::InputStream>> streams = {writeSinglePartitionStream(inputs)};
 
-  auto output = readStreams(facebook::velox::asRowType(inputs[0]->type()), kBatchSize, std::move(streams));
+  auto output = readStreams(facebook::velox::asRowType(inputs[0]->type()), kBatchSize, std::move(streams), true);
 
   ASSERT_EQ(output.size(), 2);
   ASSERT_EQ(output[0]->size(), kBatchSize);
   ASSERT_EQ(output[1]->size(), inputs[3]->size());
   facebook::velox::test::assertEqualVectors(mergeRowVectors({inputs[0], inputs[1], inputs[2]}), output[0]);
   facebook::velox::test::assertEqualVectors(inputs[3], output[1]);
+}
+
+TEST_F(VeloxShuffleReaderStreamMergeTest, hashReaderDoesNotMergeByDefault) {
+  constexpr int32_t kBatchSize = 100;
+  std::vector<RowVectorPtr> inputs = {
+      makeRowVector({makeFlatVector<int32_t>({1, 2})}),
+      makeRowVector({makeFlatVector<int32_t>({3, 4})}),
+      makeRowVector({makeFlatVector<int32_t>({5, 6})})};
+
+  const auto rowType = facebook::velox::asRowType(inputs[0]->type());
+  auto output = readStreams(rowType, kBatchSize, {writeSinglePartitionStream(inputs)});
+
+  ASSERT_EQ(output.size(), inputs.size());
+  for (size_t i = 0; i < inputs.size(); ++i) {
+    facebook::velox::test::assertEqualVectors(inputs[i], output[i]);
+  }
 }
 
 TEST_F(VeloxShuffleReaderStreamMergeTest, hashReaderMergesWithinEachStreamOnly) {
@@ -615,7 +648,7 @@ TEST_F(VeloxShuffleReaderStreamMergeTest, hashReaderMergesWithinEachStreamOnly) 
   std::vector<std::shared_ptr<arrow::io::InputStream>> streams = {
       writeSinglePartitionStream({inputs[0], inputs[1]}), writeSinglePartitionStream({inputs[2], inputs[3]})};
 
-  auto output = readStreams(facebook::velox::asRowType(inputs[0]->type()), kBatchSize, std::move(streams));
+  auto output = readStreams(facebook::velox::asRowType(inputs[0]->type()), kBatchSize, std::move(streams), true);
 
   ASSERT_EQ(output.size(), 2);
   facebook::velox::test::assertEqualVectors(mergeRowVectors({inputs[0], inputs[1]}), output[0]);
@@ -636,7 +669,7 @@ TEST_F(VeloxShuffleReaderStreamMergeTest, hashReaderDoesNotMergeAcrossStreams) {
     streams.push_back(writeSinglePartitionStream(input));
   }
 
-  auto output = readStreams(facebook::velox::asRowType(inputs[0]->type()), kBatchSize, std::move(streams));
+  auto output = readStreams(facebook::velox::asRowType(inputs[0]->type()), kBatchSize, std::move(streams), true);
 
   ASSERT_EQ(output.size(), inputs.size());
   for (size_t i = 0; i < inputs.size(); ++i) {
@@ -661,7 +694,7 @@ TEST_F(VeloxShuffleReaderStreamMergeTest, hashReaderCarriesOverPayloadThatWouldE
 
   std::vector<std::shared_ptr<arrow::io::InputStream>> streams = {writeSinglePartitionStream(inputs)};
 
-  auto output = readStreams(facebook::velox::asRowType(inputs[0]->type()), kBatchSize, std::move(streams));
+  auto output = readStreams(facebook::velox::asRowType(inputs[0]->type()), kBatchSize, std::move(streams), true);
 
   ASSERT_EQ(output.size(), 2);
   facebook::velox::test::assertEqualVectors(inputs[0], output[0]);
@@ -675,7 +708,7 @@ TEST_F(VeloxShuffleReaderStreamMergeTest, hashReaderFlushesMergedRowsBeforeDicti
   std::vector<std::shared_ptr<arrow::io::InputStream>> streams = {
       writeSinglePartitionStream(plainInput), writeSinglePartitionStream(dictionaryInput, true)};
 
-  auto output = readStreams(facebook::velox::asRowType(plainInput->type()), kBatchSize, std::move(streams));
+  auto output = readStreams(facebook::velox::asRowType(plainInput->type()), kBatchSize, std::move(streams), true);
 
   ASSERT_EQ(output.size(), 2);
   facebook::velox::test::assertEqualVectors(plainInput, output[0]);
@@ -694,7 +727,7 @@ TEST_F(VeloxShuffleReaderStreamMergeTest, hashReaderDoesNotMergeComplexTypeStrea
     streams.push_back(writeSinglePartitionStream(input));
   }
 
-  auto output = readStreams(facebook::velox::asRowType(inputs[0]->type()), kBatchSize, std::move(streams));
+  auto output = readStreams(facebook::velox::asRowType(inputs[0]->type()), kBatchSize, std::move(streams), true);
 
   ASSERT_EQ(output.size(), inputs.size());
   facebook::velox::test::assertEqualVectors(inputs[0], output[0]);

@@ -471,6 +471,7 @@ VeloxHashShuffleReaderDeserializer::VeloxHashShuffleReaderDeserializer(
     VeloxMemoryManager* memoryManager,
     std::vector<bool> isValidityBuffer,
     bool hasComplexType,
+    bool enableStreamMerge,
     int64_t& deserializeTime,
     int64_t& decompressTime)
     : streamReader_(streamReader),
@@ -482,12 +483,17 @@ VeloxHashShuffleReaderDeserializer::VeloxHashShuffleReaderDeserializer(
       memoryManager_(memoryManager),
       isValidityBuffer_(std::move(isValidityBuffer)),
       hasComplexType_(hasComplexType),
+      enableStreamMerge_(enableStreamMerge),
       deserializeTime_(deserializeTime),
       decompressTime_(decompressTime) {}
 
 bool VeloxHashShuffleReaderDeserializer::shouldSkipMerge() const {
-  // Complex type or dictionary encodings do not support merging.
-  return hasComplexType_ || !dictionaryFields_.empty();
+  // Stream merge is a reader-side raw payload fast path: for plain payloads it
+  // concatenates buffers before Velox vectors are materialized, avoiding the generic
+  // RowVector append cost paid by VeloxResizeBatchesExec. Keep complex and dictionary
+  // payloads on the existing per-payload path; VeloxResizeBatchesExec can be enabled
+  // separately as the generic complement for those cases.
+  return !enableStreamMerge_ || hasComplexType_ || !dictionaryFields_.empty();
 }
 
 bool VeloxHashShuffleReaderDeserializer::resolveNextBlockType() {
@@ -912,7 +918,8 @@ VeloxShuffleReaderDeserializerFactory::VeloxShuffleReaderDeserializerFactory(
     int64_t readerBufferSize,
     int64_t deserializerBufferSize,
     VeloxMemoryManager* memoryManager,
-    ShuffleWriterType shuffleWriterType)
+    ShuffleWriterType shuffleWriterType,
+    bool enableHashShuffleReaderStreamMerge)
     : schema_(schema),
       codec_(codec),
       veloxCompressionType_(veloxCompressionType),
@@ -921,7 +928,8 @@ VeloxShuffleReaderDeserializerFactory::VeloxShuffleReaderDeserializerFactory(
       readerBufferSize_(readerBufferSize),
       deserializerBufferSize_(deserializerBufferSize),
       memoryManager_(memoryManager),
-      shuffleWriterType_(shuffleWriterType) {
+      shuffleWriterType_(shuffleWriterType),
+      enableHashShuffleReaderStreamMerge_(enableHashShuffleReaderStreamMerge) {
   initFromSchema();
 }
 
@@ -952,6 +960,7 @@ std::unique_ptr<ColumnarBatchIterator> VeloxShuffleReaderDeserializerFactory::cr
           memoryManager_,
           isValidityBuffer_,
           hasComplexType_,
+          enableHashShuffleReaderStreamMerge_,
           deserializeTime_,
           decompressTime_);
     case ShuffleWriterType::kSortShuffle:
