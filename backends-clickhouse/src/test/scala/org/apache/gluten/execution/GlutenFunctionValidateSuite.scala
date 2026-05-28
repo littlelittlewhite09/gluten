@@ -668,6 +668,22 @@ class GlutenFunctionValidateSuite extends GlutenClickHouseWholeStageTransformerS
     }
   }
 
+  test("test flatten with nullable inner arrays") {
+    val sql =
+      """
+        |select id, flatten(arr)
+        |from (
+        |  select id,
+        |    if(id = 0,
+        |      array(array(cast(id + 1 as int)), cast(null as array<int>)),
+        |      array(array(cast(id + 1 as int)))) as arr
+        |  from range(2)
+        |)
+        |order by id
+        |""".stripMargin
+    runQueryAndCompare(sql)(checkGlutenPlan[ProjectExecTransformer])
+  }
+
   test("test common subexpression eliminate") {
     def checkOperatorCount[T <: TransformSupport](count: Int)(df: DataFrame)(implicit
         tag: ClassTag[T]): Unit = {
