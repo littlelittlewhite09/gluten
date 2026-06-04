@@ -170,7 +170,7 @@ object ConverterUtils extends Logging {
               .asInstanceOf[DataType],
             isNullable(substraitType.getTimestamp.getNullability))
         } catch {
-          case _: ClassNotFoundException =>
+          case _: ReflectiveOperationException =>
             throw new GlutenNotSupportException(s"Type $substraitType not supported.")
         }
       case Type.KindCase.TIMESTAMP_TZ =>

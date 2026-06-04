@@ -16,14 +16,14 @@
  */
 package org.apache.gluten.substrait.expression;
 
-import org.apache.gluten.substrait.type.TimestampTypeNode;
+import org.apache.gluten.substrait.type.TimestampNTZTypeNode;
 import org.apache.gluten.substrait.type.TypeNode;
 
 import io.substrait.proto.Expression.Literal.Builder;
 
 public class TimestampNTZLiteralNode extends LiteralNodeWithValue<Long> {
   public TimestampNTZLiteralNode(Long value) {
-    super(value, new TimestampTypeNode(true));
+    super(value, new TimestampNTZTypeNode(true));
   }
 
   public TimestampNTZLiteralNode(Long value, TypeNode typeNode) {
