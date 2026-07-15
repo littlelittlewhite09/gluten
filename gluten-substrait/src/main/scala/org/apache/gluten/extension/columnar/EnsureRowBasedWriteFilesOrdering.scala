@@ -17,11 +17,12 @@
 package org.apache.gluten.extension.columnar
 
 import org.apache.gluten.execution.{SortExecTransformer, TransformSupport}
+import org.apache.gluten.sql.shims.SparkShimLoader
 
-import org.apache.spark.sql.catalyst.expressions.SortOrder
+import org.apache.spark.sql.catalyst.expressions.{Expression, SortOrder}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.execution.{ColumnarWriteFilesExec, SortExec, SparkPlan}
-import org.apache.spark.sql.execution.datasources.{V1WritesUtils, WriteFilesExec}
+import org.apache.spark.sql.execution.datasources.WriteFilesExec
 
 /**
  * Re-adds the local sort on dynamic partition (and bucket) columns that a row-based
@@ -46,9 +47,13 @@ import org.apache.spark.sql.execution.datasources.{V1WritesUtils, WriteFilesExec
  * `WriteFilesExec` that [[ColumnarWriteFilesExec]] injects for the native path is skipped by
  * checking for its [[ColumnarWriteFilesExec.NoopLeaf]] child.
  *
- * The required ordering and the "already satisfied" check reuse [[V1WritesUtils]] so that the
- * behavior stays identical to vanilla `FileFormatWriter` (including the concurrent-writers and
- * small-file-merge cases where `getSortOrder` returns empty).
+ * The required ordering is obtained through [[SparkShimLoader]] from `V1WritesUtils.getSortOrder`
+ * so that the behavior stays identical to vanilla `FileFormatWriter` (including the
+ * concurrent-writers and small-file-merge cases where `getSortOrder` returns empty). It is fetched
+ * via the shim because `V1WritesUtils` only exists since Spark 3.4; on Spark 3.2/3.3 the shim
+ * returns `Nil` and this rule is a no-op (the planned-write `WriteFilesExec` path is not used
+ * there). The "already satisfied" check mirrors `V1WritesUtils.isOrderingMatched`, which is pure
+ * catalyst and version-agnostic, so it is inlined here.
  *
  * This rule must run before [[org.apache.gluten.extension.columnar.transition.InsertTransitions]]:
  * when the write's child is an offloaded transformer we insert a native [[SortExecTransformer]]
@@ -58,20 +63,36 @@ import org.apache.spark.sql.execution.datasources.{V1WritesUtils, WriteFilesExec
 object EnsureRowBasedWriteFilesOrdering extends Rule[SparkPlan] {
   override def apply(plan: SparkPlan): SparkPlan = plan.transformUp {
     case w: WriteFilesExec if !w.child.isInstanceOf[ColumnarWriteFilesExec.NoopLeaf] =>
-      val requiredOrdering: Seq[SortOrder] = V1WritesUtils.getSortOrder(
-        w.child.output,
-        w.partitionColumns,
-        w.bucketSpec,
-        w.options,
-        w.staticPartitions.size)
+      val requiredOrdering: Seq[SortOrder] =
+        SparkShimLoader.getSparkShims.getWriteFilesRequiredOrdering(
+          w.child.output,
+          w.partitionColumns,
+          w.bucketSpec,
+          w.options,
+          w.staticPartitions.size)
       if (
         requiredOrdering.isEmpty ||
-        V1WritesUtils.isOrderingMatched(requiredOrdering.map(_.child), w.child.outputOrdering)
+        isOrderingMatched(requiredOrdering.map(_.child), w.child.outputOrdering)
       ) {
         w
       } else {
         w.withNewChildren(sortPlan(w.child, requiredOrdering) :: Nil)
       }
+  }
+
+  // Mirrors `V1WritesUtils.isOrderingMatched`. Pure catalyst and identical across Spark versions,
+  // so it is inlined to avoid depending on `V1WritesUtils`, which is absent before Spark 3.4.
+  private def isOrderingMatched(
+      requiredOrdering: Seq[Expression],
+      outputOrdering: Seq[SortOrder]): Boolean = {
+    if (requiredOrdering.length > outputOrdering.length) {
+      false
+    } else {
+      requiredOrdering.zip(outputOrdering).forall {
+        case (requiredOrder, outputOrder) =>
+          outputOrder.satisfies(outputOrder.copy(child = requiredOrder))
+      }
+    }
   }
 
   private def sortPlan(child: SparkPlan, requiredOrdering: Seq[SortOrder]): SparkPlan =

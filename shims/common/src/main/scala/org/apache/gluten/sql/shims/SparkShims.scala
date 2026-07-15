@@ -24,7 +24,8 @@ import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.internal.io.FileCommitProtocol
 import org.apache.spark.sql.{AnalysisException, SparkSession}
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.{Attribute, BinaryArithmetic, Expression, InputFileBlockLength, InputFileBlockStart, InputFileName, RaiseError, UnBase64}
+import org.apache.spark.sql.catalyst.catalog.BucketSpec
+import org.apache.spark.sql.catalyst.expressions.{Attribute, BinaryArithmetic, Expression, InputFileBlockLength, InputFileBlockStart, InputFileName, RaiseError, SortOrder, UnBase64}
 import org.apache.spark.sql.catalyst.plans.JoinType
 import org.apache.spark.sql.catalyst.plans.QueryPlan
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
@@ -128,6 +129,19 @@ trait SparkShims {
   }
 
   def enableNativeWriteFilesByDefault(): Boolean = false
+
+  /**
+   * The local sort a row-based `WriteFilesExec` requires on its child for dynamic partition (and
+   * bucket) writes. Delegates to `V1WritesUtils.getSortOrder`, which only exists since Spark 3.4;
+   * on Spark 3.2/3.3 the planned-write `WriteFilesExec` path is not used at runtime, so the default
+   * returns `Nil`.
+   */
+  def getWriteFilesRequiredOrdering(
+      outputColumns: Seq[Attribute],
+      partitionColumns: Seq[Attribute],
+      bucketSpec: Option[BucketSpec],
+      options: Map[String, String],
+      numStaticPartitionCols: Int): Seq[SortOrder] = Nil
 
   def broadcastInternal[T: ClassTag](sc: SparkContext, value: T): Broadcast[T] = {
     // Since Spark 3.4, the `sc.broadcast` has been optimized to use `sc.broadcastInternal`.
